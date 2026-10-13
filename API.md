@@ -62,7 +62,7 @@ The `memory_checks` configuration builds the library with `/MDd` for the debug-C
 | --- | --- | --- |
 | `taps` | — | Filter length N ≥ 1, or N ≥ 2 when antisymmetric. |
 | `bands` | — | A borrowed view of at least one `Band`, read only during construction. |
-| `symmetry` | `symmetric` | Together with the parity of N, this selects the filter type (see the table below). |
+| `symmetry` | `symmetric` | Together with the parity of N, this selects the filter type (see the table below). `automatic` lets the engine choose (see "Choosing the type"). |
 | `response` | `constant` | `differentiator` requires `antisymmetric`. |
 | `density` | 16 | Grid points per extremum. The grid spacing is π/(density·(d+1)), where d is the degree in the table below. |
 
@@ -72,6 +72,31 @@ The `memory_checks` configuration builds the library with `/MDd` for the debug-C
 | `antisymmetric` | Type III, d = (N−3)/2, forces A(0) = A(π) = 0 | Type IV, d = N/2 − 1, forces A(0) = 0 |
 
 A band with a nonzero target that touches a forced zero is rejected with `incompatible_endpoint`. The one exception is a differentiator band starting at 0.
+
+#### Choosing the type
+
+The forced zeros are properties of linear phase itself, not of this library, so they decide which filters a given length can represent:
+
+| Filter needs gain at | Odd N | Even N |
+| --- | --- | --- |
+| neither 0 nor π (bandpass, Hilbert) | Type I or III | Type II or IV |
+| 0 only (lowpass) | Type I | Type II |
+| π only (highpass) | Type I | Type IV only |
+| both 0 and π (bandstop, notch, multiband with both ends) | Type I | **impossible** |
+
+With `Symmetry::automatic`, the engine chooses for you:
+- A differentiator becomes antisymmetric.
+- Otherwise it uses `symmetric` unless that hits a forced zero, and then `antisymmetric` if that fits the bands.
+- `symmetric` is preferred whenever both fit.
+- If neither fits, `status()` is `incompatible_endpoint`; for even N this happens exactly when the filter needs gain at both 0 and π. Use an odd length instead.
+
+`Exchange::symmetry()` reports the choice. Both choices have the same constant group delay of (N−1)/2 samples. The antisymmetric one also adds a constant 90° phase offset (H = i·e^{−iαω}A). That doesn't distort the delay, but it does matter when the output is summed with other filters, as in a crossover.
+
+Measured with `automatic` at weights 1:
+- **8 taps:** lowpass −14 dB, bandpass −14 dB, highpass −15 dB (chosen antisymmetric); bandstop and notch are impossible.
+- **15 taps:** lowpass −24 dB, highpass −25 dB, bandpass −21 dB, bandstop −21 dB, and a 0.02π-wide notch −13 dB.
+
+All of them converge in 4–7 iterations.
 
 ### `Lowpass`
 
@@ -135,6 +160,7 @@ The grid has about density·(d+1)·(total band width)/π points. `max_points` ca
 | Member | Behaviour |
 | --- | --- |
 | `Status status() const noexcept` | Setup status, or `invalid_specification` after being moved from. |
+| `Symmetry symmetry() const noexcept` | The symmetry actually used: the requested one, or the type chosen for `automatic`. It is never `automatic` after a valid setup. |
 | `Result run(std::size_t max_iterations = 64, double tolerance = 1e-6) noexcept` | Designs from scratch and is deterministic: the same specification and arguments give bit-identical taps. It never allocates. It first withdraws the outputs of any previous run, so a failed run leaves nothing usable. |
 | `std::span<const double> taps() const noexcept` | h[0..N−1] with exact (anti)symmetry; empty unless the last run succeeded. H(ω) = e^{−iαω}A(ω), or i·e^{−iαω}A(ω) when antisymmetric, with α = (N−1)/2. |
 | `std::optional<double> amplitude(double omega) const noexcept` | The design's real amplitude A(ω). It is empty unless the last run succeeded and 0 ≤ ω ≤ π, and exactly 0 at forced zeros. |

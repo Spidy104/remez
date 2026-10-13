@@ -43,7 +43,7 @@ enum class Status {
     return "unknown";
 }
 
-enum class Symmetry { symmetric, antisymmetric };
+enum class Symmetry { symmetric, antisymmetric, automatic };
 enum class Response { constant, differentiator };
 
 struct Band {
@@ -97,6 +97,7 @@ public:
     ~Exchange() = default;
 
     [[nodiscard]] Status status() const noexcept { return status_; }
+    [[nodiscard]] Symmetry symmetry() const noexcept { return symmetry_; }
     [[nodiscard]] Result run(std::size_t max_iterations = 64, double tolerance = 1e-6) noexcept;
     [[nodiscard]] std::span<const double> taps() const noexcept;
     [[nodiscard]] std::optional<double> amplitude(double omega) const noexcept;

@@ -49,6 +49,14 @@ The source carries no comments. The numerical reasoning lives in the Method sect
    - **The problem:** samples inside transition bands come from an extrapolating interpolant, whose rounding is amplified there and leaks into the bands (3e-12 at 223 taps).
    - **The fix:** one step of iterative refinement. The taps' polynomial and P are both degree d, so interpolating the residuals at the d + 1 nodes, where the values are exact data, reproduces their difference exactly.
 
+## Short filters
+
+Every converging design down to 2 taps is fully verified. An even length forces a zero at π (symmetric) or at 0 (antisymmetric), so:
+- **An 8-tap highpass:** possible only as the antisymmetric Type IV. `Symmetry::automatic` picks it (−15 dB at 8 taps) and reports the choice through `symmetry()`.
+- **An 8-tap bandstop or notch:** needs gain at both ends, so no even-length linear-phase filter exists. The engine says so with `incompatible_endpoint`; 7, 9 or 15 taps work.
+
+API.md has the full table and the measured 8- and 15-tap results.
+
 ## Memory
 
 - **Setup:** the constructor validates first and makes no allocation for an invalid specification. Otherwise it makes exactly seven allocations, all sized from the specification and capped so byte counts fit `ptrdiff_t`: the grid, the reference, the bands, the nodes, the peaks, the samples and the taps.
@@ -88,6 +96,7 @@ xmake f -m release && xmake -y benchmark && xmake run benchmark
 - a mirror-symmetric seed;
 - removing the exact-constant path;
 - a move constructor or move assignment that leaves the source marked ready;
+- an automatic choice that prefers antisymmetric when symmetric also fits;
 - one hidden `std::vector` in `run()`, caught by the debug-CRT target.
 
 **Precision check (outside the suite).** I dumped the final reference and taps as exact hex floats and compared them with the true interpolant in 50-digit mpmath:

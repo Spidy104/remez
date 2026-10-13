@@ -108,13 +108,28 @@ struct Layout {
     return {taps, bands, Symmetry::symmetric, Response::constant, spec.density};
 }
 
+[[nodiscard]] Specification resolve(Specification spec, std::size_t max_points) noexcept {
+    if (spec.symmetry != Symmetry::automatic) return spec;
+    if (spec.response == Response::differentiator) {
+        spec.symmetry = Symmetry::antisymmetric;
+        return spec;
+    }
+    spec.symmetry = Symmetry::symmetric;
+    if (layout(spec, max_points).status != Status::incompatible_endpoint) return spec;
+    auto alternative = spec;
+    alternative.symmetry = Symmetry::antisymmetric;
+    return layout(alternative, max_points).status == Status::ok ? alternative : spec;
+}
+
 }
 
 Exchange::Exchange(const Lowpass& spec, std::size_t max_points)
     : Exchange(lowpass_specification(spec, lowpass_bands(spec)), max_points) {}
 
-Exchange::Exchange(const Specification& spec, std::size_t max_points)
-    : symmetry_(spec.symmetry), response_(spec.response) {
+Exchange::Exchange(const Specification& requested, std::size_t max_points) {
+    const auto spec = resolve(requested, max_points);
+    symmetry_ = spec.symmetry;
+    response_ = spec.response;
     const auto size = layout(spec, max_points);
     status_ = size.status;
     if (status_ != Status::ok) return;

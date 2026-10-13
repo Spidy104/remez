@@ -64,9 +64,9 @@ double weighted_error(const Band& band, Response response, double omega, double 
     return band.weight * (band.target - a);
 }
 
-double factor(const Specification& spec, double omega) {
-    if (spec.symmetry == Symmetry::symmetric) return spec.taps % 2 == 0 ? std::cos(omega / 2) : 1.0;
-    return spec.taps % 2 == 0 ? std::sin(omega / 2) : std::sin(omega);
+double factor(Symmetry symmetry, std::size_t taps, double omega) {
+    if (symmetry == Symmetry::symmetric) return taps % 2 == 0 ? std::cos(omega / 2) : 1.0;
+    return taps % 2 == 0 ? std::sin(omega / 2) : std::sin(omega);
 }
 
 class EvaluationBound {
@@ -126,7 +126,8 @@ remez::Result verify(const Specification& spec, double tolerance = 1e-6) {
     }
     check(result.status == Status::ok && result.flatness <= tolerance, "exchange converges");
     const auto h = engine.taps();
-    const bool anti = spec.symmetry == Symmetry::antisymmetric;
+    const bool anti = engine.symmetry() == Symmetry::antisymmetric;
+    check(spec.symmetry == Symmetry::automatic || engine.symmetry() == spec.symmetry, "explicit symmetry is kept");
     check(h.size() == spec.taps, "tap count");
     for (std::size_t k = 0; k < h.size(); ++k)
         check(std::isfinite(h[k]) && h[k] == (anti ? -h[h.size() - 1 - k] : h[h.size() - 1 - k]), "finite taps with exact symmetry");
@@ -144,7 +145,7 @@ remez::Result verify(const Specification& spec, double tolerance = 1e-6) {
             const auto H = shifted_response(h, omega);
             const double a = anti ? H.imag() : H.real();
             const double internal = amplitude(engine, omega);
-            check(std::abs(a - internal) <= tap_tolerance + evaluation(omega, factor(spec, omega), internal) &&
+            check(std::abs(a - internal) <= tap_tolerance + evaluation(omega, factor(engine.symmetry(), spec.taps, omega), internal) &&
                       std::abs(anti ? H.real() : H.imag()) <= tap_tolerance,
                   "complex tap response matches amplitude, linear phase");
             const bool relative = spec.response == Response::differentiator && band.target != 0.0;
@@ -323,6 +324,46 @@ void general() {
                   "exact zero in every form");
         }
     }
+}
+
+void short_designs() {
+    const auto automatic = Symmetry::automatic;
+    const std::array lowpass{Band{0, .2 * pi, 1, 1}, Band{.35 * pi, pi, 0, 1}};
+    const std::array highpass{Band{0, .4 * pi, 0, 1}, Band{.55 * pi, pi, 1, 1}};
+    const std::array bandpass{Band{0, .15 * pi, 0, 1}, Band{.3 * pi, .5 * pi, 1, 1}, Band{.65 * pi, pi, 0, 1}};
+    const std::array bandstop{Band{0, .2 * pi, 1, 1}, Band{.35 * pi, .55 * pi, 0, 1}, Band{.7 * pi, pi, 1, 1}};
+    const std::array notch{Band{0, .4 * pi, 1, 1}, Band{.49 * pi, .51 * pi, 0, 1}, Band{.6 * pi, pi, 1, 1}};
+    const std::array slope{Band{0, .8 * pi, 1, 1}, Band{.9 * pi, pi, 0, 10}};
+    const auto resolved = [](const Specification& spec) { return Exchange(spec).symmetry(); };
+    for (std::size_t N = 2; N <= 16; ++N) {
+        verify({N, lowpass, automatic});
+        check(resolved({N, lowpass, automatic}) == Symmetry::symmetric, "automatic lowpass stays symmetric");
+        if (N >= 3) {
+            verify({N, bandpass, automatic});
+            check(resolved({N, bandpass, automatic}) == Symmetry::symmetric, "automatic bandpass prefers symmetric");
+        }
+    }
+    for (const std::size_t N : {4u, 6u, 8u, 10u, 16u}) {
+        verify({N, highpass, automatic});
+        check(resolved({N, highpass, automatic}) == Symmetry::antisymmetric, "even highpass resolves to Type IV");
+    }
+    for (const std::size_t N : {7u, 9u, 15u}) {
+        verify({N, highpass, automatic});
+        verify({N, bandstop, automatic});
+        verify({N, notch, automatic});
+        check(resolved({N, highpass, automatic}) == Symmetry::symmetric, "odd highpass resolves to Type I");
+    }
+    for (const auto& bands : {std::span<const Band>{bandstop}, std::span<const Band>{notch}}) {
+        Exchange impossible(Specification{8, bands, automatic});
+        check(impossible.status() == Status::incompatible_endpoint && impossible.run().status == Status::incompatible_endpoint &&
+                  impossible.taps().empty(),
+              "even-length bandstop is impossible in linear phase");
+    }
+    verify({15, slope, automatic, Response::differentiator});
+    check(resolved({16, slope, automatic, Response::differentiator}) == Symmetry::antisymmetric, "automatic differentiator");
+    check(resolved({8, highpass, Symmetry::symmetric}) == Symmetry::symmetric &&
+              Exchange(Specification{8, highpass, Symmetry::symmetric}).status() == Status::incompatible_endpoint,
+          "explicit symmetric is never overridden");
 }
 
 void ownership() {
@@ -506,6 +547,7 @@ int main() {
 #endif
     invalid_inputs();
     ownership();
+    short_designs();
     scipy_references();
     lowpass();
     general();
