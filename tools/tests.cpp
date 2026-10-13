@@ -366,6 +366,88 @@ void short_designs() {
           "explicit symmetric is never overridden");
 }
 
+struct Measured {
+    double passband_ripple_db;
+    double stopband_attenuation_db;
+};
+
+Measured measure_lowpass(std::span<const double> h, double pass_edge, double stop_edge) {
+    double low = std::numeric_limits<double>::infinity();
+    double high = 0.0;
+    double stop = 0.0;
+    for (std::size_t j = 0; j <= 8192; ++j) {
+        const double t = static_cast<double>(j) / 8192;
+        const double in_pass = shifted_response(h, std::lerp(0.0, pass_edge, t)).real();
+        const double in_stop = std::abs(shifted_response(h, std::lerp(stop_edge, pi, t)).real());
+        low = std::min(low, in_pass);
+        high = std::max(high, in_pass);
+        stop = std::max(stop, in_stop);
+    }
+    return {20 * std::log10(high / low), -20 * std::log10(stop)};
+}
+
+void decibels() {
+    using remez::DecibelBand;
+    using remez::Region;
+    constexpr double rate = 48000.0;
+    const std::array spec{DecibelBand{Region::pass, 0.0, 9600.0, 0.5}, DecibelBand{Region::stop, 12000.0, 24000.0, 60.0}};
+    std::array<Band, 2> bands{};
+    check(remez::convert(spec, rate, bands) == Status::ok, "dB specification converts");
+    const double ratio = std::pow(10.0, 0.5 / 20);
+    const double pass_deviation = (ratio - 1) / (ratio + 1);
+    check(bands[0].lower == 0.0 && bands[1].upper == pi && std::abs(bands[0].upper - 0.4 * pi) <= 4 * eps &&
+              std::abs(bands[1].lower - 0.5 * pi) <= 4 * eps,
+          "Hz edges map to radians, Nyquist exactly to pi");
+    check(bands[0].target == 1.0 && bands[1].target == 0.0, "pass target is the gain, stop target zero");
+    for (const double odd_rate : {11.0, 41.0, 44.0}) {
+        std::array<Band, 1> edge{};
+        const std::array nyquist{DecibelBand{Region::stop, 0.0, odd_rate / 2, 40.0}};
+        check(remez::convert(nyquist, odd_rate, edge) == Status::ok && edge[0].upper == pi, "Nyquist maps exactly to pi at any rate");
+    }
+    check(std::abs(bands[0].weight * pass_deviation - 1) <= 4 * eps && std::abs(bands[1].weight * 1e-3 - 1) <= 1e-12,
+          "weights are reciprocal tolerances");
+
+    Exchange long_design(Specification{61, bands});
+    const auto met = long_design.run();
+    check(met.status == Status::ok && met.max_error <= 1.0, "61 taps meet 0.5 dB / 60 dB");
+    verify({61, bands});
+    const auto good = measure_lowpass(long_design.taps(), bands[0].upper, bands[1].lower);
+    check(good.passband_ripple_db <= 0.5 && good.stopband_attenuation_db >= 60.0, "independent measurement confirms the spec");
+    check(std::abs(good.passband_ripple_db - remez::achieved_decibels(spec[0], met.max_error)) <= 1e-4 &&
+              std::abs(good.stopband_attenuation_db - remez::achieved_decibels(spec[1], met.max_error)) <= 1e-4,
+          "achieved_decibels matches the measured response");
+
+    Exchange short_design(Specification{9, bands});
+    const auto missed = short_design.run();
+    check(missed.status == Status::ok && missed.max_error > 1.0, "9 taps converge but cannot meet the spec");
+    const auto weak = measure_lowpass(short_design.taps(), bands[0].upper, bands[1].lower);
+    check(weak.stopband_attenuation_db < 60.0 &&
+              std::abs(weak.stopband_attenuation_db - remez::achieved_decibels(spec[1], missed.max_error)) <= 1e-4 &&
+              std::abs(weak.passband_ripple_db - remez::achieved_decibels(spec[0], missed.max_error)) <= 1e-4,
+          "achieved_decibels reports the shortfall exactly");
+
+    const auto expect = [&](std::span<const DecibelBand> in, double sample_rate, std::size_t room, Status status) {
+        std::array<Band, 4> out{};
+        check(remez::convert(in, sample_rate, std::span{out}.first(room)) == status, "invalid dB specification rejected");
+    };
+    for (const double bad : {0.0, -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
+        expect(spec, bad, 2, Status::invalid_sample_rate);
+    expect(spec, rate, 1, Status::invalid_bands);
+    expect({}, rate, 0, Status::invalid_bands);
+    const auto one = [&](DecibelBand band, Status status) { expect(std::array{band}, rate, 1, status); };
+    one({Region::pass, 0.0, 30000.0, 0.5}, Status::invalid_bands);
+    one({Region::pass, 5000.0, 5000.0, 0.5}, Status::invalid_bands);
+    one({Region::pass, -1.0, 5000.0, 0.5}, Status::invalid_bands);
+    one({static_cast<Region>(5), 0.0, 5000.0, 0.5}, Status::invalid_bands);
+    one({Region::pass, 0.0, 5000.0, 0.0}, Status::invalid_decibels);
+    one({Region::stop, 0.0, 5000.0, -3.0}, Status::invalid_decibels);
+    one({Region::stop, 0.0, 5000.0, 1e5}, Status::invalid_decibels);
+    one({Region::pass, 0.0, 5000.0, std::numeric_limits<double>::quiet_NaN()}, Status::invalid_decibels);
+    one({Region::pass, 0.0, 5000.0, 0.5, 0.0}, Status::invalid_target);
+    check(std::isnan(remez::achieved_decibels(spec[0], -1.0)) && std::isinf(remez::achieved_decibels(spec[0], 1e9)),
+          "achieved_decibels rejects negative error and saturates");
+}
+
 void ownership() {
     const std::array lp{Band{0, .2 * pi, 1, 1}, Band{.3 * pi, pi, 0, 10}};
     auto input = lp;
@@ -548,6 +630,7 @@ int main() {
     invalid_inputs();
     ownership();
     short_designs();
+    decibels();
     scipy_references();
     lowpass();
     general();

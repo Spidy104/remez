@@ -22,7 +22,9 @@ enum class Status {
     grid_limit,
     invalid_tolerance,
     numerical_failure,
-    nonconvergence
+    nonconvergence,
+    invalid_sample_rate,
+    invalid_decibels
 };
 
 [[nodiscard]] constexpr std::string_view to_string(Status status) noexcept {
@@ -39,6 +41,8 @@ enum class Status {
     case Status::invalid_tolerance: return "invalid_tolerance";
     case Status::numerical_failure: return "numerical_failure";
     case Status::nonconvergence: return "nonconvergence";
+    case Status::invalid_sample_rate: return "invalid_sample_rate";
+    case Status::invalid_decibels: return "invalid_decibels";
     }
     return "unknown";
 }
@@ -68,6 +72,19 @@ struct Lowpass {
     std::array<double, 2> weights{1.0, 1.0};
     std::size_t density{16};
 };
+
+enum class Region { pass, stop };
+
+struct DecibelBand {
+    Region region;
+    double lower_hz;
+    double upper_hz;
+    double decibels;
+    double gain{1.0};
+};
+
+[[nodiscard]] Status convert(std::span<const DecibelBand> bands, double sample_rate, std::span<Band> out) noexcept;
+[[nodiscard]] double achieved_decibels(const DecibelBand& band, double max_error) noexcept;
 
 struct Point {
     double omega;

@@ -468,4 +468,42 @@ std::span<const Point> Exchange::grid() const noexcept {
     return grid_;
 }
 
+namespace {
+
+[[nodiscard]] double deviation(const DecibelBand& band) noexcept {
+    if (band.region == Region::stop) return std::pow(10.0, -band.decibels / 20);
+    const double ratio = std::pow(10.0, band.decibels / 20);
+    return (ratio - 1) / (ratio + 1);
+}
+
+}
+
+Status convert(std::span<const DecibelBand> bands, double sample_rate, std::span<Band> out) noexcept {
+    if (!(std::isfinite(sample_rate) && sample_rate > 0.0)) return Status::invalid_sample_rate;
+    if (bands.empty() || out.size() != bands.size()) return Status::invalid_bands;
+    const double nyquist = sample_rate / 2;
+    for (std::size_t b = 0; b < bands.size(); ++b) {
+        const auto& band = bands[b];
+        const bool edges = std::isfinite(band.lower_hz) && std::isfinite(band.upper_hz) && band.lower_hz >= 0.0 &&
+                           band.lower_hz < band.upper_hz && band.upper_hz <= nyquist;
+        if (!edges || (band.region != Region::pass && band.region != Region::stop)) return Status::invalid_bands;
+        if (!(std::isfinite(band.decibels) && band.decibels > 0.0)) return Status::invalid_decibels;
+        const bool pass = band.region == Region::pass;
+        if (pass && !(std::isfinite(band.gain) && band.gain > 0.0)) return Status::invalid_target;
+        const double absolute = pass ? band.gain * deviation(band) : deviation(band);
+        const double weight = 1.0 / absolute;
+        if (!(absolute > 0.0 && std::isfinite(weight))) return Status::invalid_decibels;
+        out[b] = {pi * (2 * band.lower_hz / sample_rate), pi * (2 * band.upper_hz / sample_rate), pass ? band.gain : 0.0, weight};
+    }
+    return Status::ok;
+}
+
+double achieved_decibels(const DecibelBand& band, double max_error) noexcept {
+    if (!(std::isfinite(max_error) && max_error >= 0.0)) return std::numeric_limits<double>::quiet_NaN();
+    const double reached = max_error * deviation(band);
+    if (band.region == Region::stop) return -20 * std::log10(reached);
+    if (!(reached < 1.0)) return std::numeric_limits<double>::infinity();
+    return 20 * std::log10((1 + reached) / (1 - reached));
+}
+
 }

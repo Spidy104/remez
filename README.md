@@ -1,135 +1,118 @@
-# Remez
+# remez
 
-Parks–McClellan (Remez exchange) design of linear-phase FIR filters in C++20 binary64 arithmetic: Types I–IV, any number of ordered disjoint bands with constant targets and weights, and relative-error differentiators. It builds with xmake, MSVC (primary) and Clang. Follow [AGENTS.md](AGENTS.md).
+A Parks-McClellan (Remez exchange) designer for linear-phase FIR filters, written in C++20.
 
-The full API contract (types, statuses, ownership, lifetimes, memory, thread safety, linking and numerical limits) is in [API.md](API.md). [examples/design.cpp](examples/design.cpp) designs a bandpass filter and filters test tones with the result.
+It handles all four linear-phase types, any number of bands, and differentiators. You can give the spec in radians with weights, or in Hz with dB tolerances. Builds with xmake on MSVC and Clang.
 
-| Path | Contents |
+## Quick start
+
+```cpp
+#include <remez.hpp>
+
+using remez::Region;
+const std::array spec{
+    remez::DecibelBand{Region::pass, 0.0, 9600.0, 0.5},
+    remez::DecibelBand{Region::stop, 12000.0, 24000.0, 60.0},
+};
+std::array<remez::Band, 2> bands{};
+if (remez::convert(spec, 48000.0, bands) != remez::Status::ok) return;
+
+remez::Exchange designer(remez::Specification{.taps = 61, .bands = bands});
+const auto result = designer.run();
+const bool met = result.status == remez::Status::ok && result.max_error <= 1.0;
+```
+
+That asks for 0.5 dB of passband ripple up to 9.6 kHz and 60 dB of attenuation above 12 kHz, at 48 kHz. When `met` is true, `designer.taps()` holds the 61 coefficients.
+
+`convert` sets each band's weight to 1/tolerance, so `max_error <= 1` means every band meets its dB requirement. `achieved_decibels` tells you what you actually got. The example in [examples/design.cpp](examples/design.cpp) uses that to find the shortest length that meets a 48 kHz bandpass spec. It settles on 57 taps, with 0.495 dB ripple and 60.1 dB attenuation.
+
+The full API, including statuses, lifetimes and threading, is in [API.md](API.md).
+
+## Building
+
+```powershell
+xmake f -m release --toolchain=msvc     # or --toolchain=clang
+xmake -y                                # library, tests, example
+xmake run tests
+xmake run example
+```
+
+To use it from another xmake project, add `includes("path/to/remez")` and `add_deps("remez")`. Anything else can link `remez.lib` and add `include/` to the include path. API.md covers the runtime flags.
+
+| Path | What it is |
 | --- | --- |
-| `include/remez.hpp` | The public header. |
-| `src/remez.cpp` | Validation, grid, fit, scan, peak refinement and selection, and tap recovery. |
-| `src/seed.cpp` | The equilibrium-measure initial reference. |
-| `examples/design.cpp` | A usage example (target `example`). |
-| `tools/tests.cpp` | The test suite (targets `tests` and `memory_tests`). |
-| `tools/benchmark.cpp` | Release timings (target `benchmark`). |
-| `tools/verify-sanitizers.ps1` | Release verification across both compilers. |
+| `include/remez.hpp` | public header |
+| `src/remez.cpp` | validation, grid, exchange loop, tap recovery, dB conversion |
+| `src/seed.cpp` | initial reference |
+| `examples/design.cpp` | dB/Hz example |
+| `tools/tests.cpp` | tests (`tests`, and `memory_tests` with the debug CRT) |
+| `tools/benchmark.cpp` | timings |
+| `tools/verify-sanitizers.ps1` | full release check |
 
-```powershell
-xmake f -m release --toolchain=msvc && xmake -y && xmake run example
-```
+## How it works
 
-The source carries no comments. The numerical reasoning lives in the Method section below, and the contract in API.md.
+Every type is reduced to the same problem. A linear-phase filter's amplitude is A(ω) = Q(ω)·P(cos ω), where Q is 1, cos(ω/2), sin ω or sin(ω/2) for Types I to IV. That leaves a polynomial P of degree d to fit. The weighted error W(D − QP) becomes WQ(D/Q − P), so each type is fitted with target D/Q and weight WQ. Differentiators use relative error, which stays finite at DC. Grid points where Q forces A to zero are dropped.
 
-## Method
+The initial reference matters more than anything else for long filters. The optimal alternation points crowd towards band edges, following the equilibrium measure of the bands in x = cos ω. `seed.cpp` computes that measure, solving for one root per gap, and places the starting points by it. Evenly spaced starting points, which the classic implementations use, make the first error estimate collapse to rounding noise above about 190 taps. The exchange then never recovers.
 
-1. **Transformed problem.** Each type writes A(w) = Q(w)P(cos w) with Q = 1, cos(w/2), sin w, sin(w/2) for Types I–IV, so every type is fitted by a polynomial P of degree d.
-   - **Weighted error:** W(D − QP) = WQ(D/Q − P), so the fit uses target D/Q and weight WQ.
-   - **Differentiator bands** with slope s use relative error W(sw − A)/(|s|w), so the fit uses r = Q/w, target s/r and weight Wr/|s|. This stays finite at DC.
-   - **Forced zeros:** grid points where Q forces A = 0 are left out, and a nonzero target there is rejected (`incompatible_endpoint`).
-2. **Grid.** Each band is sampled uniformly with `std::lerp` at spacing about π/(density·(d+1)), with exact band endpoints.
-3. **Initial reference: equilibrium measure.** Alternation points follow the equilibrium measure of the bands in x = cos w (Kadec). Equispaced references behave like equispaced interpolation, so their first levelled error collapses toward rounding level at high degree.
-   - **Density:** for k bands it is |q(x)|/(π√|R(x)|), where R is the product of the band endpoint factors and q has one root per gap with zero gap mass (Akhiezer).
-   - **Roots:** solved by Gauss–Seidel; one sweep is exact for two bands.
-   - **Quadrature:** 64-node Gauss–Chebyshev.
-   - **Placement:** each band gets a share of points by mass, placed at equal steps of its own measure.
-   - **No mirror symmetry:** the last band leaves out its upper endpoint. A mirror-symmetric reference for a mirror-symmetric specification, such as a Hilbert band centred on π/2, makes the levelled error of an even target vanish identically.
-   - **Fallback:** uniform indices when there are more bands than points.
-4. **Fit.** Barycentric weights wₖ = 1/∏2(xₖ − xⱼ), with `frexp` every 16 factors.
-   - **Levelled error:** from Σ wₖP(xₖ) = 0, giving δ = Σ wₖDₖ / Σ(−1)ᵏwₖ/Wₖ and node values yₖ = Dₖ + sₖ with shift sₖ = −(−1)ᵏδ/Wₖ.
-   - **Evaluation set:** P is evaluated on n − 1 nodes with weights wₖ(xₖ − xₘ), which is exactly degree d. All n nodes would add a rounding-level degree-(d+1) term.
-5. **Scan, refine, select.**
-   - **Error form:** the Lagrange basis sums to one, so the error is evaluated as W·Σℓₖ(x)(D(x) − Dₖ − sₖ), not W(D − P).
-     - **Why:** D and P agree to the ripple, so subtracting them cancels away all but a few digits. In the error form, a node in the same constant band contributes its shift exactly.
-     - **Effect:** at 255 taps the flatness floor drops from about 7e-6 to about 4e-7. Bands with varying transformed targets (Hilbert's −1/sin w) keep the old floor.
-   - **Scan:** each sign run of the sampled error contributes its largest point.
-   - **Refine:** interior peaks are refined by successive parabolic interpolation inside their grid bracket. Band-edge peaks stay on the edge, so a bracket never crosses a transition.
-   - **Select:** n alternating peaks are kept by repeatedly removing the weakest (an interior one together with its weaker equal-sign neighbour).
-   - **Convergence:** when (max − min)/max over the kept peaks is at most `tolerance`. Peaks that meet are reported as `numerical_failure`.
-6. **Taps.** A direct real inverse DFT of A at w_m = 2πm/N, with integer phase reduction and exact mirroring.
-   - **The problem:** samples inside transition bands come from an extrapolating interpolant, whose rounding is amplified there and leaks into the bands (3e-12 at 223 taps).
-   - **The fix:** one step of iterative refinement. The taps' polynomial and P are both degree d, so interpolating the residuals at the d + 1 nodes, where the values are exact data, reproduces their difference exactly.
+Each iteration then does five things:
+1. It fits P through the reference by barycentric interpolation and solves for the levelled error δ.
+2. It scans the grid for the largest error in each sign run.
+3. It refines each peak with a few parabolic steps.
+4. It keeps the strongest alternating set.
+5. It stops once the peaks are flat to within the tolerance.
 
-## Short filters
+Two numerical details buy most of the accuracy. First, the error is evaluated as Σ ℓₖ(x)(D − Dₖ − sₖ) rather than as D − P(x). This avoids subtracting two numbers that agree to the ripple, and lowers the precision floor about 20 times. Second, the taps come from an inverse DFT of the amplitude plus one refinement pass. Samples taken inside transition bands are badly conditioned, and the refinement removes the error they leak into the passband.
 
-Every converging design down to 2 taps is fully verified. An even length forces a zero at π (symmetric) or at 0 (antisymmetric), so:
-- **An 8-tap highpass:** possible only as the antisymmetric Type IV. `Symmetry::automatic` picks it (−15 dB at 8 taps) and reports the choice through `symmetry()`.
-- **An 8-tap bandstop or notch:** needs gain at both ends, so no even-length linear-phase filter exists. The engine says so with `incompatible_endpoint`; 7, 9 or 15 taps work.
+An even length forces a zero. A symmetric even-length filter is zero at π, and an antisymmetric one is zero at 0. So an 8-tap highpass only exists as the antisymmetric Type IV, and an 8-tap bandstop or notch doesn't exist in linear phase at all. With `Symmetry::automatic` the library picks whichever type fits and reports the choice. Odd lengths have no such restriction.
 
-API.md has the full table and the measured 8- and 15-tap results.
+## Accuracy and limits
 
-## Memory
+Everything runs in plain double precision with no fast-math. Convergence is checked on a dense grid with refined peaks, not proven over the continuous band. Against a 50-digit mpmath reference, the 223-tap lowpass taps are within 1e-15 of the exact interpolant they represent.
 
-- **Setup:** the constructor validates first and makes no allocation for an invalid specification. Otherwise it makes exactly seven allocations, all sized from the specification and capped so byte counts fit `ptrdiff_t`: the grid, the reference, the bands, the nodes, the peaks, the samples and the taps.
-- **After setup:** `run`, `taps`, `amplitude`, `extrema` and `grid` never allocate, on success or failure.
-- **Allocation failure:** throws `std::bad_alloc` from the constructor, and RAII releases what was already allocated.
-- **Copying and moving:** copying is deleted, so there are no hidden allocations. Moves are `noexcept` and allocation-free, and leave the source empty and reporting `invalid_specification`.
+How flat the error can get depends on the size of the ripple, not on the number of taps:
 
-## Checks
+| Ripple | Examples | Flatness reached |
+| --- | --- | --- |
+| above 1e-8 | everything up to 801 taps in the tests | 1e-6 |
+| about 5e-10 | 255-tap lowpass, bandpass, Type II, differentiator | 1e-6 |
+| about 3e-10 | 255-tap Hilbert transformer | 1e-5 |
+| about 3e-12 | 319-tap Type I | 1e-5 |
+| about 3e-12 | 320-tap Type II to IV | doesn't converge, reports `nonconvergence` |
 
-```powershell
-.\tools\verify-sanitizers.ps1   # sanitizer probes, ASan/UBSan tests, debug-CRT target, then debug and release
-                                # tests, example and release benchmark on both compilers
-xmake f -m release && xmake -y benchmark && xmake run benchmark
-```
+The last rows are around −190 to −230 dB. That is far below what float32 coefficients (about −145 dB) or any converter can carry, so in practice these designs are simply longer than their spec needs.
 
-**What the tests check (`tools/tests.cpp`)**
-- **Every converged design** gets the same checks:
-  - finite taps with exact (anti)symmetry;
-  - the full complex tap response against `amplitude` on 2,049 points per band, plus zero quadrature (linear phase);
-  - alternation and equal ripple at the reference;
-  - a dense physical error search for missed peaks, using only the taps;
-  - deterministic restart, and withdrawal of every output after a failed run.
-- **The seed's purpose:** on seven designs up to 255 taps, the first levelled error must be at least 0.1 of the final ripple (measured 0.61–0.94) and never above it (de la Vallée Poussin). Equispaced seeds give 1e-2 to 1e-8 of it.
-- **The tap-to-amplitude tolerance** is 64·N·eps for tap rounding, plus Higham's forward-error bound for the second barycentric form (IMA J. Numer. Anal. 2004), built independently from the public reference. Only the extreme-weight design needs that bound, at under 1e-3 of it.
-- **References:** 12 SciPy 1.18.1 references (density 512), which are the Type-I amplitudes and coefficients and nine general-form coefficient fixtures. A minimax design must also do no worse than SciPy at 223 and 224 taps, where SciPy stops 4–5% above the minimax ripple.
-- **API contract:** `static_assert`s that the engine is not copyable and is nothrow-movable. Moved-from and move-assigned-from engines expose nothing and refuse to run, and the caller's band array can change after construction.
-- **Coverage:** lengths 1–801 across all types, highpass, bandpass, bandstop, five-band designs, Hilbert transformers and differentiators. It includes narrow (0.02π) and edge-adjacent transitions, weight ratios of 1e6 and common weight scales of 1e±100, exact zero and constant targets, and every invalid input status.
-- **Debug-CRT target:** checks the seven setup allocations and their byte bounds, zero allocations in all runtime calls, no leaks after success, failure or each forced allocation failure, and positive controls for both detectors.
+Not supported: arbitrary target shapes (only flat bands and differentiators), minimum-phase design, FFT acceleration, SIMD and threads.
 
-**Mutation checks.** Each of these deliberate bugs makes the suite fail at a specific check:
-- the plain W(D − P) error;
-- removing tap refinement;
-- removing peak refinement;
-- dropping a node without reweighting;
-- a wrong antisymmetric sign;
-- the equispaced seed;
-- a mirror-symmetric seed;
-- removing the exact-constant path;
-- a move constructor or move assignment that leaves the source marked ready;
-- an automatic choice that prefers antisymmetric when symmetric also fits;
-- one hidden `std::vector` in `run()`, caught by the debug-CRT target.
+## Testing
 
-**Precision check (outside the suite).** I dumped the final reference and taps as exact hex floats and compared them with the true interpolant in 50-digit mpmath:
-- **223 taps:** `amplitude` is within 2.0e-15 and the taps within 9.4e-16. The taps' true maximum weighted error is 8.776885e-9 against the ripple 8.776884e-9.
-- **Extreme weights (1e-3 and 1e3, 63 taps):** `amplitude` is within 2.6e-12 and the taps within 4.0e-13.
+`tools/verify-sanitizers.ps1` builds and runs everything. It runs MSVC ASan, Clang ASan and UBSan, and the debug-CRT allocation tests, then debug and release on both compilers, including the example and the benchmark.
 
-`long double` is binary64 on this MSVC-ABI target, so such checks need mpmath.
+The tests check every converged design independently of the library's internals:
+- tap symmetry;
+- the complex frequency response computed from the taps;
+- alternation and equal ripple at the reference;
+- a dense search for missed peaks.
 
-## Performance and limits
+They compare against 12 SciPy reference designs, and check that no 223/224-tap design is worse than SciPy's. They also cover every invalid input, the dB conversion against independent measurements, short designs from 2 to 16 taps, and moves.
 
-These figures come from the `benchmark` target in the release-verification run: Release, five-trial medians in ms, tolerance 1e-6, density 16, weights 1 and 10. Lowpass transitions are 0.2π–0.3π ("narrow": 0.24π–0.26π), and the bandpass is 0/0.2/0.3/0.6/0.7π.
+The debug-CRT build confirms that the constructor makes exactly seven allocations and that nothing after it allocates or leaks, including when allocation fails partway through setup.
 
-| Design | Taps | Iterations | Ripple | MSVC | Clang |
-| --- | --- | --- | --- | --- | --- |
-| lowpass | 15 | 5 | 3.7e-1 | 0.023 | 0.020 |
-| lowpass | 63 | 5 | 5.1e-3 | 0.18 | 0.17 |
-| lowpass | 127 | 6 | 2.3e-5 | 0.72 | 0.70 |
-| lowpass, narrow | 255 | 6 | 1.1e-2 | 2.70 | 2.72 |
-| lowpass | 223 | 5 | 8.8e-9 | 1.97 | 1.96 |
-| lowpass | 255 | 5 | 6.5e-10 | 2.67 | 2.67 |
-| bandpass | 223 | 17 | 6.9e-9 | 5.62 | 5.59 |
-| Hilbert, Type III | 223 | 5 | 4.6e-9 | 2.27 | 2.26 |
-| differentiator, Type III | 223 | 9 | 1.0e-8 | 3.80 | 3.68 |
+When adding a test, break the code on purpose and make sure the test fails. The current suite catches all of the deliberate bugs tried so far: wrong signs, missing refinement steps, bad seeds, broken moves, wrong dB formulas, and a stray allocation in `run()`.
 
-**Against the double-double version (commit f7bd6e7)**, measured on an earlier day:
-- **Speed:** this version is 1.5–7× faster, for example the narrow 255-tap lowpass at 4.19 → 2.72 ms and the 255-tap lowpass at 17.8 → 2.67 ms on Clang.
-- **Iterations:** it needs one more iteration at 15/63/127 taps.
-- **Ripples:** they agree to about 8 digits, which is what flatness 1e-6 implies.
+## Performance
 
-SciPy 1.18.1 takes about 2.1 ms for the narrow 255-tap lowpass.
+These are release timings from `xmake run benchmark`, the median of five runs, in milliseconds, at tolerance 1e-6:
 
-**Binary64 limits, reported rather than hidden.** These are the flatness levels reachable at each ripple:
-- **Ripples near 5e-10 (255 taps):** lowpass, bandpass, Type II and differentiator designs reach 1e-6. Hilbert transformers reach only 1e-5 (flatness 7e-6 to 1e-5), because their transformed target varies within the band.
-- **Ripples near 3e-12 (319 taps):** Type-I designs reach 1e-5 after about 50 iterations (110 ms). Type II–IV designs do not converge, and `run()` returns `nonconvergence`.
+| Design | Taps | MSVC | Clang |
+| --- | --- | --- | --- |
+| lowpass 0.2π/0.3π | 15 | 0.023 | 0.020 |
+| lowpass 0.2π/0.3π | 63 | 0.18 | 0.17 |
+| lowpass 0.2π/0.3π | 127 | 0.72 | 0.70 |
+| lowpass 0.24π/0.26π | 255 | 2.70 | 2.72 |
+| lowpass 0.2π/0.3π | 223 | 1.97 | 1.96 |
+| bandpass | 223 | 5.62 | 5.59 |
+| Hilbert, Type III | 223 | 2.27 | 2.26 |
+| differentiator, Type III | 223 | 3.80 | 3.68 |
 
-For context, float32 taps carry about 6e-8 relative error and 16-bit fixed point about 3e-5, so these ripples are far below any deployed precision.
+SciPy takes about 2.1 ms for the 255-tap narrow lowpass. The earlier double-double version of this library (commit f7bd6e7) was 1.5 to 7 times slower than these figures.
