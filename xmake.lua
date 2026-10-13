@@ -30,11 +30,13 @@ target("tests")
     add_deps("remez")
     add_files("tools/tests.cpp")
 
-target("example")
-    set_kind("binary")
-    set_default(not has_config("memory_checks"))
-    add_deps("remez")
-    add_files("examples/design.cpp")
+for _, file in ipairs(os.files("examples/*.cpp")) do
+    target("example_" .. path.basename(file))
+        set_kind("binary")
+        set_default(not has_config("memory_checks"))
+        add_deps("remez")
+        add_files(file)
+end
 
 target("benchmark")
     set_kind("binary")

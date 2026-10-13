@@ -58,7 +58,9 @@ try {
             Invoke-Xmake f -c -y "-m$mode" "--toolchain=$compiler" "--builddir=build/$compiler-$mode"
             Invoke-Xmake -y
             Invoke-Xmake run tests
-            Invoke-Xmake run example
+            foreach ($example in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'examples') -Filter *.cpp) {
+                Invoke-Xmake run "example_$($example.BaseName)"
+            }
             if ($mode -eq 'release') {
                 Invoke-Xmake -y benchmark
                 Write-Host "$compiler release benchmark"
