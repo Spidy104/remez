@@ -2,23 +2,23 @@
 
 Parks–McClellan (Remez exchange) design of linear-phase FIR filters in C++20 binary64 arithmetic: Types I–IV, any number of ordered disjoint bands with constant targets and weights, and relative-error differentiators. It builds with xmake, MSVC (primary) and Clang. Follow [AGENTS.md](AGENTS.md).
 
-```cpp
-#include "remez.hpp"
-using namespace remez;
-constexpr double pi = 3.141592653589793;
+The full API contract (types, statuses, ownership, lifetimes, memory, thread safety, linking and numerical limits) is in [API.md](API.md). [examples/design.cpp](examples/design.cpp) designs a bandpass filter and filters test tones with the result.
 
-const std::array bands{Band{0, .2 * pi, 1, 1}, Band{.3 * pi, pi, 0, 10}};
-Exchange design(Specification{63, bands});        // validates and allocates everything
-const Result result = design.run();                 // max_iterations = 64, flatness tolerance = 1e-6
-if (result.status == Status::ok) use(design.taps()); // std::span<const double>, h[0..62]
+| Path | Contents |
+| --- | --- |
+| `include/remez.hpp` | The public header. |
+| `src/remez.cpp` | Validation, grid, fit, scan, peak refinement and selection, and tap recovery. |
+| `src/seed.cpp` | The equilibrium-measure initial reference. |
+| `examples/design.cpp` | A usage example (target `example`). |
+| `tools/tests.cpp` | The test suite (targets `tests` and `memory_tests`). |
+| `tools/benchmark.cpp` | Release timings (target `benchmark`). |
+| `tools/verify-sanitizers.ps1` | Release verification across both compilers. |
+
+```powershell
+xmake f -m release --toolchain=msvc && xmake -y && xmake run example
 ```
 
-`Exchange(Lowpass{taps, pass_edge, stop_edge, {pass_weight, stop_weight}})` is the odd-length Type-I shortcut. Frequencies are radians/sample in [0, π].
-- **`amplitude(w)`:** gives A(w), where H = e^{-iαw}A, times i for antisymmetric filters.
-- **`extrema()`:** gives the final reference.
-- **`grid()`:** gives the design grid.
-
-Every output is empty or NaN unless the last `run()` converged.
+The source carries no comments. The numerical reasoning lives in the Method section below, and the contract in API.md.
 
 ## Method
 
@@ -54,13 +54,14 @@ Every output is empty or NaN unless the last `run()` converged.
 - **Setup:** the constructor validates first and makes no allocation for an invalid specification. Otherwise it makes exactly seven allocations, all sized from the specification and capped so byte counts fit `ptrdiff_t`: the grid, the reference, the bands, the nodes, the peaks, the samples and the taps.
 - **After setup:** `run`, `taps`, `amplitude`, `extrema` and `grid` never allocate, on success or failure.
 - **Allocation failure:** throws `std::bad_alloc` from the constructor, and RAII releases what was already allocated.
-- **Copying and moving:** the engine copies and moves like its vectors. A moved-from engine's `run()` returns `invalid_specification`.
+- **Copying and moving:** copying is deleted, so there are no hidden allocations. Moves are `noexcept` and allocation-free, and leave the source empty and reporting `invalid_specification`.
 
 ## Checks
 
 ```powershell
-.\tools\verify-sanitizers.ps1   # MSVC ASan, Clang ASan+UBSan, debug-CRT target, debug+release on both compilers
-xmake run tests --benchmark     # Release timings
+.\tools\verify-sanitizers.ps1   # sanitizer probes, ASan/UBSan tests, debug-CRT target, then debug and release
+                                # tests, example and release benchmark on both compilers
+xmake f -m release && xmake -y benchmark && xmake run benchmark
 ```
 
 **What the tests check (`tools/tests.cpp`)**
@@ -73,7 +74,8 @@ xmake run tests --benchmark     # Release timings
 - **The seed's purpose:** on seven designs up to 255 taps, the first levelled error must be at least 0.1 of the final ripple (measured 0.61–0.94) and never above it (de la Vallée Poussin). Equispaced seeds give 1e-2 to 1e-8 of it.
 - **The tap-to-amplitude tolerance** is 64·N·eps for tap rounding, plus Higham's forward-error bound for the second barycentric form (IMA J. Numer. Anal. 2004), built independently from the public reference. Only the extreme-weight design needs that bound, at under 1e-3 of it.
 - **References:** 12 SciPy 1.18.1 references (density 512), which are the Type-I amplitudes and coefficients and nine general-form coefficient fixtures. A minimax design must also do no worse than SciPy at 223 and 224 taps, where SciPy stops 4–5% above the minimax ripple.
-- **Coverage:** lengths 1–319 across all types, highpass, bandpass, bandstop, five-band designs, Hilbert transformers and differentiators. It includes narrow (0.02π) and edge-adjacent transitions, weight ratios of 1e6 and common weight scales of 1e±100, exact zero and constant targets, and every invalid input status.
+- **API contract:** `static_assert`s that the engine is not copyable and is nothrow-movable. Moved-from and move-assigned-from engines expose nothing and refuse to run, and the caller's band array can change after construction.
+- **Coverage:** lengths 1–801 across all types, highpass, bandpass, bandstop, five-band designs, Hilbert transformers and differentiators. It includes narrow (0.02π) and edge-adjacent transitions, weight ratios of 1e6 and common weight scales of 1e±100, exact zero and constant targets, and every invalid input status.
 - **Debug-CRT target:** checks the seven setup allocations and their byte bounds, zero allocations in all runtime calls, no leaks after success, failure or each forced allocation failure, and positive controls for both detectors.
 
 **Mutation checks.** Each of these deliberate bugs makes the suite fail at a specific check:
@@ -85,6 +87,7 @@ xmake run tests --benchmark     # Release timings
 - the equispaced seed;
 - a mirror-symmetric seed;
 - removing the exact-constant path;
+- a move constructor or move assignment that leaves the source marked ready;
 - one hidden `std::vector` in `run()`, caught by the debug-CRT target.
 
 **Precision check (outside the suite).** I dumped the final reference and taps as exact hex floats and compared them with the true interpolant in 50-digit mpmath:
@@ -95,27 +98,26 @@ xmake run tests --benchmark     # Release timings
 
 ## Performance and limits
 
-`--benchmark`, Release, five-trial medians in ms, weights 1 and 10, density 16. Transitions are 0.2π–0.3π, or 0.24π–0.26π at 255 taps. Measured on the same day; run-to-run variation is about 5%.
+These figures come from the `benchmark` target in the release-verification run: Release, five-trial medians in ms, tolerance 1e-6, density 16, weights 1 and 10. Lowpass transitions are 0.2π–0.3π ("narrow": 0.24π–0.26π), and the bandpass is 0/0.2/0.3/0.6/0.7π.
 
-| Taps | Double-double version (commit f7bd6e7), MSVC / Clang | This version, MSVC / Clang |
-| --- | --- | --- |
-| 15 | 0.054 / 0.067 | 0.027 / 0.036 |
-| 63 | 0.37 / 0.25 | 0.23 / 0.22 |
-| 127 | 1.72 / 1.07 | 0.94 / 0.95 |
-| 255 | 6.25 / 4.19 | 3.58 / 3.73 |
+| Design | Taps | Iterations | Ripple | MSVC | Clang |
+| --- | --- | --- | --- | --- | --- |
+| lowpass | 15 | 5 | 3.7e-1 | 0.023 | 0.020 |
+| lowpass | 63 | 5 | 5.1e-3 | 0.18 | 0.17 |
+| lowpass | 127 | 6 | 2.3e-5 | 0.72 | 0.70 |
+| lowpass, narrow | 255 | 6 | 1.1e-2 | 2.70 | 2.72 |
+| lowpass | 223 | 5 | 8.8e-9 | 1.97 | 1.96 |
+| lowpass | 255 | 5 | 6.5e-10 | 2.67 | 2.67 |
+| bandpass | 223 | 17 | 6.9e-9 | 5.62 | 5.59 |
+| Hilbert, Type III | 223 | 5 | 4.6e-9 | 2.27 | 2.26 |
+| differentiator, Type III | 223 | 9 | 1.0e-8 | 3.80 | 3.68 |
 
-This version needs one more iteration at 15/63/127 taps. Its ripples agree with the double-double version to about 8 digits, which is what flatness 1e-6 implies. Against the first lean commit, the error form costs 0–5% on MSVC and saves 2–15% on Clang.
+**Against the double-double version (commit f7bd6e7)**, measured on an earlier day:
+- **Speed:** this version is 1.5–7× faster, for example the narrow 255-tap lowpass at 4.19 → 2.72 ms and the 255-tap lowpass at 17.8 → 2.67 ms on Clang.
+- **Iterations:** it needs one more iteration at 15/63/127 taps.
+- **Ripples:** they agree to about 8 digits, which is what flatness 1e-6 implies.
 
-Long designs at tolerance 1e-6 on Clang -O2, against the double-double version:
-
-| Design | Double-double | This version |
-| --- | --- | --- |
-| 223-tap lowpass | 6.7 ms | 3.1 ms |
-| 223-tap bandpass | 18.5 ms | 6.2 ms |
-| 223-tap Type III differentiator | 22.9 ms | 5.4 ms |
-| 255-tap lowpass | 17.8 ms | 3.7 ms |
-
-SciPy 1.18.1 takes about 2.1 ms at 255 taps.
+SciPy 1.18.1 takes about 2.1 ms for the narrow 255-tap lowpass.
 
 **Binary64 limits, reported rather than hidden.** These are the flatness levels reachable at each ripple:
 - **Ripples near 5e-10 (255 taps):** lowpass, bandpass, Type II and differentiator designs reach 1e-6. Hilbert transformers reach only 1e-5 (flatness 7e-6 to 1e-5), because their transformed target varies within the band.

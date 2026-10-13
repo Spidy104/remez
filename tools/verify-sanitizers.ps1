@@ -56,8 +56,14 @@ try {
     foreach ($compiler in @('msvc', 'clang')) {
         foreach ($mode in @('debug', 'release')) {
             Invoke-Xmake f -c -y "-m$mode" "--toolchain=$compiler" "--builddir=build/$compiler-$mode"
-            Invoke-Xmake -y tests
+            Invoke-Xmake -y
             Invoke-Xmake run tests
+            Invoke-Xmake run example
+            if ($mode -eq 'release') {
+                Invoke-Xmake -y benchmark
+                Write-Host "$compiler release benchmark"
+                Invoke-Xmake run benchmark
+            }
         }
     }
 } finally {
