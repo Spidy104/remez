@@ -28,7 +28,7 @@ xmake -y
 xmake run tests
 ```
 
-Clang works too (`--toolchain=clang`). To use the library from another xmake project, add `includes("path/to/remez")` and `add_deps("remez")`.
+Clang works too (`--toolchain=clang`). Every build refreshes `compile_commands.json` in the project root for clangd. To use the library from another xmake project, add `includes("path/to/remez")` and `add_deps("remez")`.
 
 ## Examples
 
