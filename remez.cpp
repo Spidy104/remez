@@ -239,6 +239,22 @@ const Exchange::Range& Exchange::range(std::size_t index) const noexcept {
     return *std::ranges::lower_bound(bands_, index, {}, [](const Range& r) { return r.end - 1; });
 }
 
+// The Lagrange basis sums to one, so D(x) - P(x) = sum l_k (D(x) - D_k - shift_k). Evaluating P
+// first would subtract two numbers that agree to the ripple; here a node in the same constant
+// band contributes its shift +-delta/W_k exactly, and only the other bands' terms carry rounding.
+// For constant-target designs at 255 taps this lowers the flatness floor from about 7e-6 to 4e-7.
+double Exchange::error(const Point& p) const noexcept {
+    double numerator = 0.0, denominator = 0.0;
+    for (const auto& node : std::span{nodes_}.first(nodes_.size() - 1)) {
+        const double e = (p.desired - node.desired) - node.shift;
+        if (p.x == node.x) return p.weight * e;
+        const double t = node.w / (p.x - node.x);
+        numerator += t * e;
+        denominator += t;
+    }
+    return p.weight * numerator / denominator;
+}
+
 double Exchange::interpolate(double x, double Node::*value) const noexcept {
     double numerator = 0.0, denominator = 0.0;
     for (const auto& node : std::span{nodes_}.first(nodes_.size() - 1)) {
@@ -253,7 +269,7 @@ double Exchange::interpolate(double x, double Node::*value) const noexcept {
 // Barycentric weights w_k = 1/prod_{j != k} 2(x_k - x_j); doubling maps [-1, 1] to capacity 1, so
 // products stay moderate for well-spread nodes, and frexp every 16 factors keeps any set in range.
 // The levelled error follows from sum w_k P(x_k) = 0 for deg P < n-1 with W_k(D_k - P(x_k)) =
-// (-1)^k delta, and the node values are P(x_k) = D_k - (-1)^k delta/W_k.
+// (-1)^k delta, and the node values are P(x_k) = D_k + shift_k with shift_k = -(-1)^k delta/W_k.
 Status Exchange::fit(double& delta) noexcept {
     const auto n = reference_.size();
     const auto difference = [&](std::size_t k, std::size_t j) { return 2 * (reference_[k].x - reference_[j].x); };
@@ -270,7 +286,7 @@ Status Exchange::fit(double& delta) noexcept {
         exponent += e;
         if (product == 0.0 || !std::isfinite(product)) return Status::numerical_failure;
         // y holds the weight's binary exponent until the node values are known.
-        nodes_[k] = {reference_[k].omega, reference_[k].x, 1.0 / product, static_cast<double>(-exponent), 0.0};
+        nodes_[k] = {reference_[k].omega, reference_[k].x, 1.0 / product, static_cast<double>(-exponent), 0.0, reference_[k].desired, 0.0};
         largest = std::max(largest, -exponent);
     }
     double numerator = 0.0, denominator = 0.0;
@@ -283,8 +299,10 @@ Status Exchange::fit(double& delta) noexcept {
     }
     delta = numerator / denominator;
     if (!std::isfinite(delta)) return Status::numerical_failure;
-    for (std::size_t k = 0; k < n; ++k)
-        nodes_[k].y = reference_[k].desired - (k % 2 == 0 ? delta : -delta) / reference_[k].weight;
+    for (std::size_t k = 0; k < n; ++k) {
+        nodes_[k].shift = -(k % 2 == 0 ? delta : -delta) / reference_[k].weight;
+        nodes_[k].y = nodes_[k].desired + nodes_[k].shift;
+    }
     // All n nodes define a degree n-1 interpolant whose top coefficient sum w_k y_k vanishes only up
     // to rounding. Evaluating on n-1 nodes is exactly degree n-2; the weights of the reduced set are
     // w_k (x_k - x_m). Dropping the largest weight keeps the remaining terms well scaled.

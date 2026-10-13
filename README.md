@@ -35,9 +35,12 @@ Every output is empty or NaN unless the last `run()` converged.
    - **No mirror symmetry:** the last band leaves out its upper endpoint. A mirror-symmetric reference for a mirror-symmetric specification, such as a Hilbert band centred on π/2, makes the levelled error of an even target vanish identically.
    - **Fallback:** uniform indices when there are more bands than points.
 4. **Fit.** Barycentric weights wₖ = 1/∏2(xₖ − xⱼ), with `frexp` every 16 factors.
-   - **Levelled error:** from Σ wₖP(xₖ) = 0, giving δ = Σ wₖDₖ / Σ(−1)ᵏwₖ/Wₖ and node values yₖ = Dₖ − (−1)ᵏδ/Wₖ.
+   - **Levelled error:** from Σ wₖP(xₖ) = 0, giving δ = Σ wₖDₖ / Σ(−1)ᵏwₖ/Wₖ and node values yₖ = Dₖ + sₖ with shift sₖ = −(−1)ᵏδ/Wₖ.
    - **Evaluation set:** P is evaluated on n − 1 nodes with weights wₖ(xₖ − xₘ), which is exactly degree d. All n nodes would add a rounding-level degree-(d+1) term.
 5. **Scan, refine, select.**
+   - **Error form:** the Lagrange basis sums to one, so the error is evaluated as W·Σℓₖ(x)(D(x) − Dₖ − sₖ), not W(D − P).
+     - **Why:** D and P agree to the ripple, so subtracting them cancels away all but a few digits. In the error form, a node in the same constant band contributes its shift exactly.
+     - **Effect:** at 255 taps the flatness floor drops from about 7e-6 to about 4e-7. Bands with varying transformed targets (Hilbert's −1/sin w) keep the old floor.
    - **Scan:** each sign run of the sampled error contributes its largest point.
    - **Refine:** interior peaks are refined by successive parabolic interpolation inside their grid bracket. Band-edge peaks stay on the edge, so a bracket never crosses a transition.
    - **Select:** n alternating peaks are kept by repeatedly removing the weakest (an interior one together with its weaker equal-sign neighbour).
@@ -67,12 +70,14 @@ xmake run tests --benchmark     # Release timings
   - alternation and equal ripple at the reference;
   - a dense physical error search for missed peaks, using only the taps;
   - deterministic restart, and withdrawal of every output after a failed run.
+- **The seed's purpose:** on seven designs up to 255 taps, the first levelled error must be at least 0.1 of the final ripple (measured 0.61–0.94) and never above it (de la Vallée Poussin). Equispaced seeds give 1e-2 to 1e-8 of it.
 - **The tap-to-amplitude tolerance** is 64·N·eps for tap rounding, plus Higham's forward-error bound for the second barycentric form (IMA J. Numer. Anal. 2004), built independently from the public reference. Only the extreme-weight design needs that bound, at under 1e-3 of it.
 - **References:** 12 SciPy 1.18.1 references (density 512), which are the Type-I amplitudes and coefficients and nine general-form coefficient fixtures. A minimax design must also do no worse than SciPy at 223 and 224 taps, where SciPy stops 4–5% above the minimax ripple.
 - **Coverage:** lengths 1–319 across all types, highpass, bandpass, bandstop, five-band designs, Hilbert transformers and differentiators. It includes narrow (0.02π) and edge-adjacent transitions, weight ratios of 1e6 and common weight scales of 1e±100, exact zero and constant targets, and every invalid input status.
 - **Debug-CRT target:** checks the seven setup allocations and their byte bounds, zero allocations in all runtime calls, no leaks after success, failure or each forced allocation failure, and positive controls for both detectors.
 
 **Mutation checks.** Each of these deliberate bugs makes the suite fail at a specific check:
+- the plain W(D − P) error;
 - removing tap refinement;
 - removing peak refinement;
 - dropping a node without reweighting;
@@ -83,26 +88,37 @@ xmake run tests --benchmark     # Release timings
 - one hidden `std::vector` in `run()`, caught by the debug-CRT target.
 
 **Precision check (outside the suite).** I dumped the final reference and taps as exact hex floats and compared them with the true interpolant in 50-digit mpmath:
-- **223 taps:** `amplitude` is within 2.2e-15 and the taps within 1.2e-15.
-- **Extreme weights (1e-3 and 1e3, 63 taps):** `amplitude` is within 2.7e-12 and the taps within 2.3e-13.
+- **223 taps:** `amplitude` is within 2.0e-15 and the taps within 9.4e-16. The taps' true maximum weighted error is 8.776885e-9 against the ripple 8.776884e-9.
+- **Extreme weights (1e-3 and 1e3, 63 taps):** `amplitude` is within 2.6e-12 and the taps within 4.0e-13.
 
 `long double` is binary64 on this MSVC-ABI target, so such checks need mpmath.
 
 ## Performance and limits
 
-`--benchmark`, Release, five-trial medians in ms, weights 1 and 10, density 16. Transitions are 0.2π–0.3π, or 0.24π–0.26π at 255 taps. Both versions were measured in the same session.
+`--benchmark`, Release, five-trial medians in ms, weights 1 and 10, density 16. Transitions are 0.2π–0.3π, or 0.24π–0.26π at 255 taps. Measured on the same day; run-to-run variation is about 5%.
 
-| Taps | Previous double-double version, MSVC / Clang | This version, MSVC / Clang |
+| Taps | Double-double version (commit f7bd6e7), MSVC / Clang | This version, MSVC / Clang |
 | --- | --- | --- |
-| 15 | 0.054 / 0.067 | 0.039 / 0.025 |
-| 63 | 0.37 / 0.25 | 0.22 / 0.22 |
-| 127 | 1.72 / 1.07 | 0.93 / 0.97 |
-| 255 | 6.25 / 4.19 | 3.62 / 3.69 |
+| 15 | 0.054 / 0.067 | 0.027 / 0.036 |
+| 63 | 0.37 / 0.25 | 0.23 / 0.22 |
+| 127 | 1.72 / 1.07 | 0.94 / 0.95 |
+| 255 | 6.25 / 4.19 | 3.58 / 3.73 |
 
-This version needs one more iteration at 15/63/127 taps. Its ripples agree with the previous version to about 8 digits, which is what flatness 1e-6 implies. Long designs on Clang -O2: the 223-tap lowpass takes 3.4 ms (previously 6.7 ms), the 223-tap bandpass 6.8 ms (previously 18.5 ms), and the 223-tap Type III differentiator 5.3 ms (previously 22.9 ms). SciPy 1.18.1 takes about 2.1 ms at 255 taps.
+This version needs one more iteration at 15/63/127 taps. Its ripples agree with the double-double version to about 8 digits, which is what flatness 1e-6 implies. Against the first lean commit, the error form costs 0–5% on MSVC and saves 2–15% on Clang.
 
-**Binary64 limits, reported rather than hidden.** Flatness is resolvable to about 1e-15·(signal scale)/ripple:
-- **Ripples near 5e-10 (255 taps):** reach 1e-5 but not 1e-6. The lowpass, bandpass and differentiator at 255 taps run at 1e-5. The previous version reached 1e-6 on the Type-I designs using double-double.
-- **Ripples near 3e-12 (319 taps):** do not converge, and `run()` returns `nonconvergence`.
+Long designs at tolerance 1e-6 on Clang -O2, against the double-double version:
+
+| Design | Double-double | This version |
+| --- | --- | --- |
+| 223-tap lowpass | 6.7 ms | 3.1 ms |
+| 223-tap bandpass | 18.5 ms | 6.2 ms |
+| 223-tap Type III differentiator | 22.9 ms | 5.4 ms |
+| 255-tap lowpass | 17.8 ms | 3.7 ms |
+
+SciPy 1.18.1 takes about 2.1 ms at 255 taps.
+
+**Binary64 limits, reported rather than hidden.** These are the flatness levels reachable at each ripple:
+- **Ripples near 5e-10 (255 taps):** lowpass, bandpass, Type II and differentiator designs reach 1e-6. Hilbert transformers reach only 1e-5 (flatness 7e-6 to 1e-5), because their transformed target varies within the band.
+- **Ripples near 3e-12 (319 taps):** Type-I designs reach 1e-5 after about 50 iterations (110 ms). Type II–IV designs do not converge, and `run()` returns `nonconvergence`.
 
 For context, float32 taps carry about 6e-8 relative error and 16-bit fixed point about 3e-5, so these ripples are far below any deployed precision.

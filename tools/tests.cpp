@@ -157,13 +157,6 @@ void lowpass() {
         for (const auto [pass, stop] : {std::pair{0.2, 0.3}, std::pair{0.24, 0.26}, std::pair{0.01, 0.03}, std::pair{0.97, 0.99}}) {
             const Lowpass spec{taps, pass * pi, stop * pi, {1, 10}, 32};
             const auto bands = std::array{Band{0, spec.pass_edge, 1, 1}, Band{spec.stop_edge, pi, 0, 10}};
-            if (taps == 255 && pass == 0.2) {
-                // Ripple 6e-10: binary64 resolves flatness only to about 6e-6.
-                Exchange engine(spec);
-                check(engine.run().status != Status::ok && engine.taps().empty(), "unresolvable flatness is reported");
-                check(engine.run(64, 1e-5).status == Status::ok, "resolvable at 1e-5");
-                continue;
-            }
             const auto result = verify({taps, bands, Symmetry::symmetric, Response::constant, 32});
             Exchange adapter(spec);
             check(adapter.run().ripple == result.ripple, "lowpass adapter equals the general specification");
@@ -252,11 +245,20 @@ void general() {
     // Long designs: equispaced starts collapse to rounding-level ripples and stall here.
     verify({223, lp, sym, constant, 16});
     verify({224, lp, sym, constant, 16});
-    verify({255, bp, sym, constant, 16}, 1e-5);
+    verify({255, bp, sym, constant, 16});
     verify({223, hilbert, anti, constant, 16});
     verify({224, hilbert, anti, constant, 16});
     verify({223, diff3, anti, slope, 16});
-    verify({255, diff3, anti, slope, 16}, 1e-5);
+    verify({255, diff3, anti, slope, 16});
+    // The seed's purpose: the first levelled error is already within an order of magnitude of the
+    // minimax ripple, and by de la Vallee Poussin never above it. Equispaced seeds start these at
+    // 1e-2..1e-8 of it, and a mirror-symmetric one levels the Hilbert designs to rounding noise.
+    for (const auto& spec : {Specification{63, hilbert, anti}, Specification{223, hilbert, anti}, Specification{64, hilbert, anti},
+                             Specification{223, lp}, Specification{255, bp}, Specification{223, diff3, anti, slope}, Specification{31, lp}}) {
+        Exchange engine(spec);
+        const double first = engine.run(1).ripple, final = engine.run(128, 1e-5).ripple;
+        check(first >= 0.1 * final && first <= final * (1 + 1e-5), "first levelled error is a near-minimax lower bound");
+    }
     // SciPy (density 16) stops at max weighted errors 9.125001e-9 (223) and 8.738776e-9 (224) on
     // 40001 points per band; a minimax design cannot do worse.
     for (const auto [N, scipy] : {std::pair{223u, 9.125001e-9}, std::pair{224u, 8.738776e-9}}) {
@@ -264,8 +266,10 @@ void general() {
         const auto r = engine.run();
         check(r.status == Status::ok && r.max_error <= scipy && r.ripple >= 0.9 * scipy, "no worse than SciPy");
     }
-    // Ripple 3e-12 at 319 taps is below what binary64 can level to 1e-5: reported, not faked.
-    Exchange deep(Specification{319, lp, sym, constant, 16});
+    // Ripple 3e-12: the Type-I design levels to 1e-5; the Type-II one, whose transformed targets
+    // 1/cos(w/2) vary within the band, cannot, and says so instead of returning taps.
+    verify({319, lp, sym, constant, 16}, 1e-5);
+    Exchange deep(Specification{320, lp, sym, constant, 16});
     check(deep.run(128, 1e-5).status != Status::ok && deep.taps().empty(), "binary64 limit reported");
     // A common weight scale changes the ripple by the same factor and nothing else.
     Exchange base(Specification{31, hilbert, anti});
@@ -397,7 +401,7 @@ void memory_contract() {
             Exchange engine(spec);
             counting = false;
             const auto M = engine.grid().size(), n = spec.symmetry == Symmetry::symmetric ? (spec.taps - 1) / 2 + 2 : spec.taps / 2 + 1;
-            const auto payload = 32 * M + 32 * n + 48 * spec.bands.size() + 24 * n + 24 * M + 8 * (spec.taps / 2 + 1) + 8 * spec.taps;
+            const auto payload = 32 * M + 32 * n + 48 * spec.bands.size() + 56 * n + 24 * M + 8 * (spec.taps / 2 + 1) + 8 * spec.taps;
             check(allocations == 7 && allocation_bytes >= payload && allocation_bytes <= payload + 7 * 64, "seven bounded setup buffers");
             for (int repeat = 0; repeat < 3; ++repeat) {
                 allocations = 0;

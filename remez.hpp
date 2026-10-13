@@ -72,11 +72,11 @@ public:
 
 private:
     struct Range { Band band; std::size_t begin, end; };
-    struct Node { double omega, x, w, y, residual; };
+    struct Node { double omega, x, w, y, residual, desired, shift; };
     struct Peak { std::size_t index; double omega, error; };
 
     [[nodiscard]] double interpolate(double x, double Node::*value = &Node::y) const noexcept;
-    [[nodiscard]] double error(const Point& p) const noexcept { return p.weight * (p.desired - interpolate(p.x)); }
+    [[nodiscard]] double error(const Point& p) const noexcept;
     [[nodiscard]] double tap_polynomial(double omega) const noexcept;
     void inverse(double Node::*value, bool accumulate) noexcept;
     [[nodiscard]] Point point(const Band& band, double omega) const noexcept;
