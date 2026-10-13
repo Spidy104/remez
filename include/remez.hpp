@@ -155,6 +155,7 @@ private:
     void inverse(Values values, bool accumulate) noexcept;
     [[nodiscard]] double tap_polynomial(double omega) const noexcept;
     [[nodiscard]] Status recover() noexcept;
+    [[nodiscard]] Status bound_taps(Result& result) const noexcept;
 
     std::vector<Point> grid_;
     std::vector<Point> reference_;

@@ -88,11 +88,13 @@ An invalid spec allocates nothing. A valid one makes seven allocations, about 56
 | `symmetry()` | the symmetry in use |
 | `run(max_iterations = 64, tolerance = 1e-6)` | designs from scratch; deterministic, allocation-free, clears earlier results first |
 | `taps()` | the N coefficients, or empty unless the last run succeeded |
-| `amplitude(ω)` | A(ω) as `std::optional`, where H = e^{−iαω}A (times i if antisymmetric) and α = (N−1)/2 |
+| `amplitude(ω)` | fitted A(ω) as `std::optional`, where H = e^{−iαω}A (times i if antisymmetric) and α = (N−1)/2; rounded taps can differ |
 | `extrema()` | final alternation points, in transformed units (target D/Q, weight W·Q) |
 | `grid()` | the design grid, or empty unless setup succeeded |
 
-`Result` holds `status`, `iterations`, `ripple` (the levelled error), `max_error` and `flatness`. Flatness is (max_error − smallest peak)/max_error, and a run stops when it reaches `tolerance`. If every target is zero, or a Type I design has one constant target everywhere, `run()` returns the exact answer immediately.
+`Result` holds `status`, `iterations`, `ripple`, `max_error` and `flatness`. `ripple` and `flatness` describe the fitted polynomial before tap recovery. Flatness is (largest fitted error − smallest fitted peak)/largest fitted error; it controls convergence.
+
+After recovery, `max_error` also covers the returned taps on the design grid, final reference and refined peaks, with allowances for evaluation rounding. It can exceed `ripple` substantially near the precision limit. Use this final `max_error` for the dB acceptance check. It is a sampled estimate, not a continuous-band certificate. If every target is zero, or a Type I design has one constant target everywhere, `run()` returns the exact answer immediately.
 
 `Exchange` can't be copied. Moves are `noexcept` and leave the source empty and unusable until it is assigned a new design.
 

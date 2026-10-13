@@ -56,6 +56,8 @@ Three details make it robust:
 - **Error formula.** The error is computed as Σ ℓₖ(D − Dₖ − sₖ) rather than D − P. This avoids cancelling two nearly equal numbers, so long filters converge about 20 times more tightly.
 - **Tap recovery.** Taps come from an inverse DFT of the amplitude plus one refinement pass. The pass removes rounding that leaks in from samples taken inside the transition bands.
 
+After recovery, `max_error` is re-checked on the returned taps, so `max_error <= 1` can't claim a spec the taps don't meet.
+
 ## Limits
 
 An even length forces a zero at 0 or π, so an 8-tap bandstop or notch can't be linear phase; use an odd length. Precision runs out only for ripples below about 1e-9 (−180 dB), beyond what float32 coefficients can hold. Arbitrary target shapes, minimum-phase design, FFT and SIMD are out of scope.
@@ -64,7 +66,7 @@ An even length forces a zero at 0 or π, so an 8-tap bandstop or notch can't be 
 
 `tools/verify-sanitizers.ps1` runs everything on MSVC and Clang: the tests, ASan, UBSan, the debug-CRT allocation checks, all examples and the benchmark. The tests check each design independently from its taps and compare against SciPy. They also confirm that `run()` never allocates, and they fail on deliberately broken versions of the code.
 
-On this machine, a 63-tap lowpass designs in 0.17 ms and a 255-tap one in 2.7 ms (`xmake run benchmark`).
+Use `xmake run benchmark` for release timings. The final tap check adds one batched sweep after convergence; it does not change iteration counts or allocate.
 
 ## License
 

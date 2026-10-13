@@ -490,6 +490,8 @@ void invalid_inputs() {
     expect({0, lp}, Status::invalid_taps);
     expect({1, std::array{Band{.05 * pi, .95 * pi, 1, 1}}, Symmetry::antisymmetric}, Status::invalid_taps);
     expect({31, {}}, Status::invalid_bands);
+    expect({1, std::array{Band{-0.001, 0.1, 1, 1}}}, Status::invalid_bands);
+    expect({31, with([](auto& b) { b[0].lower = -std::numeric_limits<double>::denorm_min(); })}, Status::invalid_bands);
     expect({31, lp, Symmetry::symmetric, Response::constant, 0}, Status::invalid_density);
     expect({31, lp, Symmetry::symmetric, Response::differentiator}, Status::invalid_specification);
     expect({31, lp, static_cast<Symmetry>(7)}, Status::invalid_specification);
@@ -524,6 +526,24 @@ void invalid_inputs() {
     check(std::ranges::count_if(points, at(.8 * pi)) == 1 && std::ranges::count_if(points, at(.9 * pi)) == 1, "exact interior band endpoints");
     for (std::size_t j = 1; j < points.size(); ++j)
         check(points[j].x < points[j - 1].x && points[j].x == std::cos(points[j].omega), "decreasing x = cos(omega)");
+}
+
+void tap_error_reporting() {
+    for (const double scale : {0x1p-38, 1.0, 0x1p38}) {
+        const std::array bands{Band{0, .2 * pi, 1, scale}, Band{.3 * pi, pi, 0, 10 * scale}};
+        Exchange engine(Specification{319, bands});
+        const auto result = engine.run(128, 1e-5);
+        check(result.status == Status::ok, "recovery reporting regression converges");
+        double maximum = 0.0;
+        for (const auto& p : engine.extrema()) {
+            const auto& band = p.omega <= bands[0].upper ? bands[0] : bands[1];
+            const double response = shifted_response(engine.taps(), p.omega).real();
+            maximum = std::max(maximum, std::abs(band.weight * (band.target - response)));
+        }
+        check(maximum > scale * 5e-12, "independent tap error exposes the recovery discrepancy");
+        check(result.max_error >= maximum, "reported error covers recovered taps at the reference");
+        if (scale == 0x1p38) check(result.max_error > 1.0, "recovered taps do not falsely meet the normalized specification");
+    }
 }
 
 #ifdef REMEZ_CRT_CHECKS
@@ -588,6 +608,21 @@ void memory_contract() {
         Exchange invalid(Specification{0, lp});
         counting = false;
         check(allocations == 0 && invalid.status() == Status::invalid_taps, "invalid setup allocates nothing");
+        counting = true;
+        Exchange negative(Specification{1, std::array{Band{-0.001, 0.1, 1, 1}}});
+        counting = false;
+        check(allocations == 0 && negative.status() == Status::invalid_bands, "negative frequency allocates nothing");
+        {
+            constexpr double scale = 0x1p38;
+            const std::array bands{Band{0, .2 * pi, 1, scale}, Band{.3 * pi, pi, 0, 10 * scale}};
+            Exchange demanding(Specification{319, bands});
+            allocations = 0;
+            counting = true;
+            const auto result = demanding.run(128, 1e-5);
+            counting = false;
+            check(allocations == 0 && result.status == Status::ok && result.max_error > 1.0,
+                "recovery error check allocates nothing");
+        }
         for (std::size_t operation = 0; operation < 7; ++operation) {
             allocations = 0;
             accepted = operation;
@@ -628,6 +663,7 @@ int main() {
     memory_contract();
 #endif
     invalid_inputs();
+    tap_error_reporting();
     ownership();
     short_designs();
     decibels();

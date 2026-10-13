@@ -81,7 +81,7 @@ struct Layout {
     std::size_t points = 0;
     double previous = -1.0;
     for (const auto& band : spec.bands) {
-        const bool ordered = std::isfinite(band.lower) && std::isfinite(band.upper) && previous < band.lower &&
+        const bool ordered = std::isfinite(band.lower) && std::isfinite(band.upper) && band.lower >= 0.0 && previous < band.lower &&
                              band.lower < band.upper && band.upper <= pi;
         if (!ordered) return {Status::invalid_bands};
         if (!(std::isfinite(band.weight) && band.weight > 0.0)) return {Status::invalid_weights};
@@ -392,6 +392,7 @@ Result Exchange::run(std::size_t max_iterations, double tolerance) noexcept {
         result.flatness = (result.max_error - magnitude(std::ranges::min(peaks, {}, magnitude))) / result.max_error;
         if (result.flatness <= tolerance) {
             result.status = recover();
+            if (result.status == Status::ok) result.status = bound_taps(result);
             ready_ = result.status == Status::ok;
             return result;
         }
@@ -444,6 +445,80 @@ Status Exchange::recover() noexcept {
     inverse(Values::residual, true);
     const bool finite = std::ranges::all_of(taps_, [](double h) { return std::isfinite(h); });
     return finite ? Status::ok : Status::numerical_failure;
+}
+
+Status Exchange::bound_taps(Result& result) const noexcept {
+    constexpr double eps = std::numeric_limits<double>::epsilon();
+    constexpr std::size_t lanes = 4;
+    const auto m = taps_.size() / 2;
+    const auto count = type_ == 1 ? m + 1 : m;
+    const std::size_t first = type_ == 1 ? 1 : 0;
+    const auto coefficient = [&](std::size_t j) {
+        return 2 * taps_[type_ == 1 ? m - j : m - 1 - j];
+    };
+    double magnitude = type_ == 1 ? std::abs(taps_[m]) : 0.0;
+    double derivative = 0.0;
+    double recurrence = 0.0;
+    for (std::size_t j = first; j < count; ++j) {
+        const double a = std::abs(coefficient(j));
+        const double k = static_cast<double>(j + 1);
+        magnitude += a * (type_ == 1 ? 1.0 : 2 * k);
+        derivative += a * (type_ == 1 ? static_cast<double>(j) * static_cast<double>(j) : 3 * k * k * k);
+        recurrence += a * (1 + 1.5 * k * (k + 1));
+    }
+    double maximum = result.max_error;
+    const auto check = [&](std::span<const Point> points, const Band& band) {
+        const bool relative = response_ == Response::differentiator && band.target != 0.0;
+        std::array<double, lanes> b1{}, b2{}, x{};
+        for (std::size_t l = 0; l < lanes; ++l) x[l] = points[std::min(l, points.size() - 1)].x;
+        for (std::size_t j = count; j-- > first;) {
+            const double c = coefficient(j);
+            for (std::size_t l = 0; l < lanes; ++l) {
+                const double product = (2 * x[l]) * b1[l];
+                const double b = (c + product) - b2[l];
+                b2[l] = b1[l];
+                b1[l] = b;
+            }
+        }
+        const double weight = relative ? band.weight / std::abs(band.target) : band.weight;
+        for (std::size_t l = 0; l < points.size(); ++l) {
+            const double omega = points[l].omega;
+            const double q = relative ? factor_over_omega(type_, omega) : factor(type_, omega);
+            if (q == 0.0 && forced(type_, omega)) continue;
+            const double value = type_ == 1 ? (taps_[m] + points[l].x * b1[l]) - b2[l] :
+                type_ == 2 ? b1[l] - b2[l] : type_ == 3 ? b1[l] : b1[l] + b2[l];
+            const double amplitude = q * value;
+            const double error = weight * (band.target - amplitude);
+            const double finish = 4 * eps * (std::abs(b1[l]) + std::abs(b2[l]) + (type_ == 1 ? std::abs(taps_[m]) : 0.0));
+            const double uncertainty = 4 * eps * recurrence * (relative ? static_cast<double>(count) : 1.0) +
+                std::abs(q) * (finish + 4 * eps * (magnitude + derivative)) +
+                4 * eps * std::abs(amplitude) + std::numeric_limits<double>::denorm_min();
+            const double bound = (std::abs(error) + weight * uncertainty + 4 * eps * std::abs(error)) * (1 + 4 * eps) +
+                std::numeric_limits<double>::denorm_min();
+            if (!std::isfinite(bound)) return Status::numerical_failure;
+            maximum = std::max(maximum, bound);
+        }
+        return Status::ok;
+    };
+    for (const auto& range : bands_) {
+        const auto points = std::span{grid_}.subspan(range.begin, range.end - range.begin);
+        for (std::size_t j = 0; j < points.size(); j += lanes) {
+            const auto status = check(points.subspan(j, std::min(lanes, points.size() - j)), range.band);
+            if (status != Status::ok) return status;
+        }
+        for (const auto& p : reference_) if (p.omega >= range.band.lower && p.omega <= range.band.upper) {
+            const std::array point{p};
+            const auto status = check(point, range.band);
+            if (status != Status::ok) return status;
+        }
+        for (const auto& peak : std::span{peaks_}.first(reference_.size())) if (peak.index >= range.begin && peak.index < range.end) {
+            const std::array point{Point{peak.omega, std::cos(peak.omega), 0.0, 0.0}};
+            const auto status = check(point, range.band);
+            if (status != Status::ok) return status;
+        }
+    }
+    result.max_error = maximum;
+    return Status::ok;
 }
 
 std::span<const double> Exchange::taps() const noexcept {
