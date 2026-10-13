@@ -65,3 +65,7 @@ An even length forces a zero at 0 or π, so an 8-tap bandstop or notch can't be 
 `tools/verify-sanitizers.ps1` runs everything on MSVC and Clang: the tests, ASan, UBSan, the debug-CRT allocation checks, all examples and the benchmark. The tests check each design independently from its taps and compare against SciPy. They also confirm that `run()` never allocates, and they fail on deliberately broken versions of the code.
 
 On this machine, a 63-tap lowpass designs in 0.17 ms and a 255-tap one in 2.7 ms (`xmake run benchmark`).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
